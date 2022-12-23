@@ -1,0 +1,148 @@
+name: sample
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  PYTHON_VERSION: 3.9
+  # --- CHANGE ME --- #
+  WORKLOAD_IDENTITY_PROVIDER: projects/397062532519/locations/global/workloadIdentityPools/sample-pool/providers/sample-provider
+  DEPLOY_SERVICE_ACCOUNT: cloudfn-cicd-sample@alivelimb-demo.iam.gserviceaccount.com
+  # ----------------- #
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v4
+        with:
+          python-version: "${{ env.PYTHON_VERSION }}"
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+        with:
+          virtualenvs-path: .venv
+          virtualenvs-create: true
+          virtualenvs-in-project: true
+          installer-parallel: false
+      - name: Load cached venv
+        id: cached-poetry-dependencies
+        uses: actions/cache@v3
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-${{ steps.setup-python.outputs.python-version }}-${{ hashFiles('**/poetry.lock') }}
+      - name: Install dependencies
+        if: steps.cached-poetry-dependencies.outputs.cache-hit != 'true'
+        run: |
+          poetry config experimental.new-installer false
+          poetry env use "${{ env.PYTHON_VERSION }}"
+          poetry install --no-interaction --no-root
+      - name: Lint with flake8, mypy
+        run: |
+          poetry run pflake8 .
+          poetry run mypy .
+      - name: Format with black, isort
+        run: |
+          poetry run black .
+          poetry run isort .
+      - name: Auto commit if change detected
+        if: ${{ !github.event.act }}
+        uses: stefanzweifel/git-auto-commit-action@v4
+        with:
+          commit_message: Formatted by auto commit in actions
+  test:
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v3
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v4
+        with:
+          python-version: "${{ env.PYTHON_VERSION }}"
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+        with:
+          virtualenvs-path: .venv
+          virtualenvs-create: true
+          virtualenvs-in-project: true
+          installer-parallel: false
+      - name: Load cached venv
+        id: cached-poetry-dependencies
+        uses: actions/cache@v3
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-${{ steps.setup-python.outputs.python-version }}-${{ hashFiles('**/poetry.lock') }}
+      - name: Install dependencies
+        if: steps.cached-poetry-dependencies.outputs.cache-hit != 'true'
+        run: |
+          poetry config experimental.new-installer false
+          poetry env use "${{ env.PYTHON_VERSION }}"
+          poetry install --no-interaction --no-root
+      - name: Test with pytest
+        run: |
+          poetry run pytest --cov=birthday_weekday --cov-report=html
+      - name: Upload test artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: test-artifact
+          path: |
+            htmlcov/
+  deploy:
+    if: ${{ !github.event.act }}
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: "read"
+      id-token: "write"
+    steps:
+      - uses: actions/checkout@v3
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v4
+        with:
+          python-version: "${{ env.PYTHON_VERSION }}"
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+        with:
+          virtualenvs-path: .venv
+          virtualenvs-create: true
+          virtualenvs-in-project: true
+          installer-parallel: false
+      - name: Load cached venv
+        id: cached-poetry-dependencies
+        uses: actions/cache@v3
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-${{ steps.setup-python.outputs.python-version }}-${{ hashFiles('**/poetry.lock') }}
+      - name: Install dependencies
+        if: steps.cached-poetry-dependencies.outputs.cache-hit != 'true'
+        run: |
+          poetry config experimental.new-installer false
+          poetry env use "${{ env.PYTHON_VERSION }}"
+          poetry install --no-interaction --no-root
+      - name: Create deploy directory
+        run: |
+          mkdir deploy
+          poetry export --without-hashes --format=requirements.txt > deploy/requirements.txt
+          cp main.py birthday_weekday.py deploy
+      - name: Auth google cloud
+        uses: google-github-actions/auth@v1
+        with:
+          workload_identity_provider: "${{ env.WORKLOAD_IDENTITY_PROVIDER }}"
+          service_account: "${{ env.DEPLOY_SERVICE_ACCOUNT }}"
+      - name: Deploy for Cloud Functions
+        run: |
+          gcloud functions deploy birthday-weekday \
+            --trigger-http \
+            --runtime=python39 \
+            --memory=128MiB \
+            --region=asia-northeast1 \
+            --source="deploy/" \
+            --entry-point=main \
+            --allow-unauthenticated
+      - name: Test for Cloud Functions
+        run: |
+          CLOUDFN_URL=$(gcloud functions describe birthday-weekday --format="value(httpsTrigger.url)" --region=asia-northeast1)
+          curl "${CLOUDFN_URL}?birthday=2000-01-01"
